@@ -4,6 +4,12 @@ import com.google.gson.Gson
 import com.google.gson.annotations.Expose
 import com.google.gson.annotations.SerializedName
 
+data class OrderReadResult(
+    @SerializedName("Timestamp") var timeStamp: String = "",
+    @SerializedName("results") var results: List<OrderRead> = listOf(),
+    @SerializedName("__count") var count: Int = 0
+)
+
 data class OrderRead(
     @SerializedName("Id") var id: Int = 0,
     @SerializedName("Code") var code: String = "",

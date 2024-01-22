@@ -13,9 +13,7 @@ import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.subscribeBy
 import io.reactivex.rxjava3.schedulers.Schedulers
 import io.reactivex.rxjava3.subjects.PublishSubject
-import okhttp3.Interceptor
 import okhttp3.OkHttpClient
-import okhttp3.Response
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.adapter.rxjava3.RxJava3CallAdapterFactory
@@ -101,6 +99,10 @@ class MainActivity : AppCompatActivity() {
             runOneTime()
         }
 
+        binding.btnTest.setOnClickListener {
+            runTest()
+        }
+
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 finish()
@@ -115,6 +117,7 @@ class MainActivity : AppCompatActivity() {
         var listProduct = listOf<Product>()
         var listPartner = listOf<Partner>()
         var listOrderRead = emptyList<OrderRead>()
+        var listOrderReadFromWeb = emptyList<OrderRead>()
         var done = 0
         var error = 0
         var progress = 0
@@ -138,6 +141,13 @@ class MainActivity : AppCompatActivity() {
                 }
                 .flatMap {
                     listProduct = it.data
+                    getListOrderReadFromWeb("ss-id=$ssid")
+                }
+                .doOnNext {
+                    publishSubjectStatus.onNext("Get order from web complete ${it.size}")
+                }
+                .flatMap {
+                    listOrderReadFromWeb = it
                     readFile1()
                 }.doOnNext {
                     publishSubjectStatus.onNext("read file 1 complete ${it.size}")
@@ -150,7 +160,7 @@ class MainActivity : AppCompatActivity() {
                     publishSubjectStatus.onNext("read file 2 complete ${it.size}")
                 }
                 .flatMap {
-                    mergeDataAsync(listProduct, listPartner, listOrderRead, it)
+                    mergeDataAsync(listProduct, listPartner, listOrderRead, listOrderReadFromWeb, it)
                 }
                 .doOnNext {
                     publishSubjectStatus.onNext(Pair(it.size, "merge file complete ${it.size}"))
@@ -188,10 +198,86 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    fun runTest() {
+        val username = "quantri@pos365.vn"
+        val password = "IT@P0s365kmS"
+        var listProduct = listOf<Product>()
+        var listPartner = listOf<Partner>()
+        var listOrderRead = emptyList<OrderRead>()
+        var listOrderReadFromWeb = emptyList<OrderRead>()
+        var done = 0
+        var error = 0
+        var progress = 0
+        binding.progressBar.isIndeterminate = true
+        disposable.add(
+            myService.auth(username, password)
+                .doOnComplete {
+                    publishSubjectStatus.onNext("Get session complete")
+                }
+                .flatMap {
+                    ssid = it.sessionId
+                    myService.syncPartner("ss-id=$ssid")
+                }.doOnNext {
+                    publishSubjectStatus.onNext("Get partner complete ${it.data.size}")
+                }
+                .flatMap {
+                    listPartner = it.data
+                    myService.syncProducts("ss-id=$ssid")
+                }.doOnNext {
+                    publishSubjectStatus.onNext("Get product complete ${it.data.size}")
+                }
+                .flatMap {
+                    listProduct = it.data
+                    getListOrderReadFromWeb("ss-id=$ssid")
+                }
+                .doOnNext {
+                    publishSubjectStatus.onNext("Get order from web complete ${it.size}")
+                }
+                .flatMap {
+                    listOrderReadFromWeb = it
+                    readFile1()
+                }.doOnNext {
+                    publishSubjectStatus.onNext("read file 1 complete ${it.size}")
+                }
+                .flatMap {
+                    listOrderRead = it
+                    readFile2()
+                }
+                .doOnNext {
+                    publishSubjectStatus.onNext("read file 2 complete ${it.size}")
+                }
+                .flatMap {
+                    mergeDataAsync(listProduct, listPartner, listOrderRead, listOrderReadFromWeb, it)
+                }
+                .doOnNext {
+                    publishSubjectStatus.onNext(Pair(it.size, "merge file complete ${it.size}"))
+                    Log.i(TAG, it.toString())
+                }
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribeOn(Schedulers.io())
+                .subscribeBy(
+                    onNext = {
+                        Log.e(TAG, "up: onNext")
+                        publishSubjectStatus.onNext(++progress)
+                        ++done
+                    },
+                    onComplete = {
+                        Log.e(TAG, "up: onComplete")
+                        publishSubjectStatus.onNext("Up completely: ${done} success - ${error} error")
+                    },
+                    onError = {
+                        Log.e(TAG, "up: onError $it")
+                        publishSubjectStatus.onError(it)
+                    }
+                )
+        )
+    }
+
     private fun mergeDataAsync(
         listProduct: List<Product>,
         listPartner: List<Partner>,
         listOrderRead: List<OrderRead>,
+        listOrderReadFromWeb: List<OrderRead>,
         listDetailRead: List<DetailRead>
     ): Observable<List<Orders>> {
         return Observable.create { emitter ->
@@ -203,10 +289,15 @@ class MainActivity : AppCompatActivity() {
                 emitter.onError(Throwable(message = "list order empty"))
                 return@create
             }
+            if(listOrderReadFromWeb.isEmpty()) {
+                emitter.onError(Throwable(message = "list order from web empty"))
+                return@create
+            }
             val listOrder = mutableListOf<Order>()
             listOrderRead.forEach { orderRead ->
                 val order = Order()
                 val findDetail = listDetailRead.filter { it.orderCode == orderRead.code }
+                val orderFromWeb = listOrderReadFromWeb.firstOrNull { it.code == orderRead.code }
                 findDetail.forEach { detailRead ->
                     val findProduct = listProduct.find { it.code == detailRead.productCode }
                     val orderDetail = OrderDetail(
@@ -225,7 +316,7 @@ class MainActivity : AppCompatActivity() {
                     )
                     order.orderDetails.add(orderDetail)
                 }
-                val findPartner = listPartner.find { it.code == orderRead.partnerCode }
+                val findPartner = listPartner.find { it.id == orderRead.partnerId }
                 if (findPartner != null) {
                     order.partnerId = orderRead.partnerId
                     order.partner = findPartner
@@ -257,9 +348,18 @@ class MainActivity : AppCompatActivity() {
                 order.channelId = orderRead.channelId
                 order.code = orderRead.code
 
+                if (orderFromWeb != null) {
+                    order.id = orderFromWeb.id
+                }
+
                 listOrder.add(order)
             }
-            emitter.onNext(listOrder.map {
+            Log.i("Before filter", listOrder.toString())
+            Log.i("Before filter", "Size = ${listOrder.size}")
+            val listOrderFiltered = listOrder.filter { order -> order.id != 0 }
+            Log.i("After filter", listOrderFiltered.toString())
+            Log.i("After filter", "Size = ${listOrderFiltered.size}")
+            emitter.onNext(listOrderFiltered.map {
                 val orders = Orders()
                 orders.order = it
                 if ((it.excessCash) < 0.0) {
@@ -269,6 +369,33 @@ class MainActivity : AppCompatActivity() {
                 orders.dontSetTime = it.purchaseDate.isEmpty()
                 orders
             })
+            emitter.onComplete()
+        }
+    }
+
+    private fun getListOrderReadFromWeb(ssId: String): Observable<List<OrderRead>> {
+        val testCount = 58
+        val liveCount = 66
+        return Observable.create {emitter ->
+            val listOrderRead = mutableListOf<OrderRead>()
+
+            val top = 100
+            var skip = 0
+            var count = 0
+
+            while (count < liveCount) {
+                val response = myService.getOrders(ssId, top, skip).execute()
+                response.body()!!.results.forEach {
+                    listOrderRead.add(it)
+                }
+
+                Log.i(TAG, listOrderRead.size.toString())
+
+                skip += 100
+                count++
+            }
+
+            emitter.onNext(listOrderRead.distinct())
             emitter.onComplete()
         }
     }
